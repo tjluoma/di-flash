@@ -1,21 +1,17 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Purpose: download and install (or update, if needed) Flash for OS X
+# Adapted from http://oit.ncsu.edu/macintosh/adobe-flash-os-x-unattended-silent-install
 #
 # From:	Tj Luo.ma
 # Mail:	luomat at gmail dot com
 # Web: 	http://RhymesWithDiploma.com
-# Date:	2014-07-12
+# Date:	2015-12-10
 
+PATH=/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin
 
-	# URL found via
-	# https://forums.adobe.com/thread/938109?start=0&tstart=0
-	# Where can I get Flash Player 11 in PKG format to distribute to Macs over our intranet?
-	# If the URL changes but the format stays the same, you should be able to just
-	# change it here.
-
-# URL='http://www.adobe.com/products/flashplayer/distribution3.html'
-
-##################################################################################################################################
+################################################################################################################
+#
+#
 
 NAME="$0:t:r"
 
@@ -27,27 +23,32 @@ TIME=$(strftime "%Y-%m-%d-at-%H.%M.%S" "$EPOCHSECONDS")
 
 function timestamp { strftime "%Y-%m-%d--%H.%M.%S" "$EPOCHSECONDS" }
 
-HOST=`hostname -s`
-HOST="$HOST:l"
-
-LOG="$HOME/Library/Logs/metalog/$NAME/$HOST/$TIME.log"
+LOG="/var/log/$NAME/$TIME.log"
 
 [[ -d "$LOG:h" ]] || mkdir -p "$LOG:h"
 [[ -e "$LOG" ]]   || touch "$LOG"
 
 function timestamp { strftime "%Y-%m-%d at %H:%M:%S" "$EPOCHSECONDS" }
-function log { echo "$NAME: $@ [`timestamp` on $HOST]" | tee -a "$LOG" }
 
-################################################################################################################
-#
-# See http://oit.ncsu.edu/macintosh/adobe-flash-os-x-unattended-silent-install
-#
+function log { echo "$NAME @ `timestamp`: $@ " | tee -a "$LOG" }
+
+##################################################################################################################################
+
+if [[ "$EUID" != "0" ]]
+then
+	log "Must be run as root. EUID = $EUID"
+
+	exit 1
+fi
+
+##################################################################################################################################
+
 CFG="/Library/Application Support/Macromedia/mms.cfg"
 
 if [[ ! -e "$CFG" ]]
 then
 
-TMPFILE=`mktemp /tmp/$LOGNAME.XXXXXXX`
+TMPFILE=`mktemp /tmp/$NAME.XXXXXXX`
 
 cat <<EOINPUT > "$TMPFILE"
 AutoUpdateDisable=0
@@ -59,32 +60,20 @@ EOINPUT
 
 	# Create directory if needed
 [[ ! -d "$CFG:h" ]] \
-	&& sudo mkdir -p "$CFG:h" \
+	&& mkdir -p "$CFG:h" \
 		&& log "Created directory: $CFG:h"
 
-sudo mv -vf "$TMPFILE" "$CFG" \
-	&& sudo chmod 644 "$CFG" \
-		&& sudo chown root:wheel "$CFG" \
+mv -vf "$TMPFILE" "$CFG" \
+	&& chmod 644 "$CFG" \
+		&& chown root:wheel "$CFG" \
 			&& log "Created $CFG (chmod 644/chown root)"
 
 fi
+
 ################################################################################################################
 #
 #	Check current version on website
 #
-# log "Checking version info from ..."
-
-## 2014-10-03 this is getting a bad result:
-## Flash Player 15.0.0.152 (Win Firefox and Mac); 15.0.0.167 (Win IE)</span>
-## so I'm trying something new
-# LATEST_VERSION=`curl -sL "$URL" | egrep 'Flash Player.* and Mac' | tr -dc '[0-9].'`
-
-# LATEST_VERSION=`curl -sL "$URL" | egrep 'Flash Player.* Mac' | sed 's# Mac.*##g' | tr -dc '[0-9].'`
-
-	## 2015-08-31 -
-	## Flash Player 18.0.0.232 (Win and Mac)
-	## Now trying 'head -1'
-# LATEST_VERSION=`curl -sL "$URL"  | egrep 'Flash Player.* Mac' | sed 's# Mac.*##g' | head -1 |  tr -dc '[0-9].'`
 
 LATEST_VERSION=`curl --silent --fail --location \
 	'http://fpdownload2.macromedia.com/get/flashplayer/update/current/xml/version_en_mac_pl.xml' \
@@ -97,44 +86,33 @@ then
 	exit 0
 fi
 
-## 2014-10-03 the length check is intended to see if we are getting two sets of results as above
-## 15 characters allows for a version number xxx.xxx.xxx.xxx
-LENGTH=`echo -n "$LATEST_VERSION" | wc -c | tr -dc '[0-9]'`
-
-if [ "$LENGTH" -gt "15" ]
-then
-	log "$LATEST_VERSION is greater than 15 characters: $LENGTH"
-	exit 0
-fi
-
-
-##################################################################################################################################
+################################################################################################################
 #
 #	Check local (installed version) if any
 #
 
 PLIST='/Library/Internet Plug-Ins/Flash Player.plugin/Contents/version.plist'
 
-if [ -e "$PLIST" ]
+if [[ -e "$PLIST" ]]
 then
 		# if the plist is installed, check the version number
-	LOCAL_VERSION=`defaults read "$PLIST" CFBundleShortVersionString`
+	INSTALLED_VERSION=`defaults read "$PLIST" CFBundleShortVersionString`
 
-	if [ "$LOCAL_VERSION" = "$LATEST_VERSION" ]
+	autoload is-at-least
+
+	is-at-least "$LATEST_VERSION" "$INSTALLED_VERSION"
+
+	if [ "$?" = "0" ]
 	then
-		log "Flash is up to date $LATEST_VERSION = $LOCAL_VERSION"
-		mv -f "$LOG" "$HOME/.Trash/"
+		log "Up-To-Date (Installed = $INSTALLED_VERSION vs Latest = $LATEST_VERSION)"
 		exit 0
 	fi
+
+else
+	INSTALLED_VERSION=""
 fi
 
-
-# 2015-01-13: If we get here, an update is available.
-# Send a push notification so I can see check to see if it works
-
-po.sh "$NAME: $LOCAL_VERSION outdated vs $LATEST_VERSION"
-
-##################################################################################################################################
+################################################################################################################
 #
 #	Define function for later
 #
@@ -152,11 +130,11 @@ function do_download
 	then
 		log "Continuing download of $PKG_URL to $FILENAME"
 			# if the file is already there, continue download
-		curl -sfL --progress-bar --continue-at - --output "$FILENAME" "$PKG_URL"
+		curl -fL --progress-bar --continue-at - --output "$FILENAME" "$PKG_URL"
 	else
 		log "Downloading $PKG_URL to $FILENAME"
 			# if the file is NOT there, don't try to continue
-		curl -sfL --progress-bar --output "$FILENAME" "$PKG_URL"
+		curl -fL --progress-bar --output "$FILENAME" "$PKG_URL"
 	fi
 
 	SIZE=$(zstat -L +size "$FILENAME")
@@ -168,26 +146,18 @@ function do_download
 	fi
 }
 
-##################################################################################################################################
-#
-#	If we get here we need to download/install new version
-#
+	##################################################################################################################################
+	#
+	#	If we get here we need to download/install new version
+	#
 
-		### This is the only 'hacky' bit: it depends on the format of the web page not changing too much.
-		###
-		### If you have `lynx` installed, this might be a little 'safer':
-		# PKG_URL=`lynx -listonly -dump -nomargins -nonumbers "$URL" | fgrep -i pkg.dmg | head -1`
+if [[ "$INSTALLED_VERSION" == "" ]]
+then
+	log "Installing $LATEST_VERSION"
+else
+	log "Updating to $LATEST_VERSION from $INSTALLED_VERSION"
+fi
 
-		# Get the page source HTML,
-		#	replace any ' or " with a new line,
-		#	and grep for 'osx' followed by 'pkg'
-		#	and then take the first response
-		# PKG_URL=`curl -sfL "$URL" | tr '"|\047' '\012' | egrep 'osx.*pkg' | head -1`
-
-## 2015-10-20 - replacing the commented-out block immediately above here
-
-
-	# Take the version number and just look at the number before the first "."
 MAJOR_VERSION=`echo "$LATEST_VERSION" | cut -d . -f 1`
 
 PKG_URL="https://fpdownload.macromedia.com/get/flashplayer/current/licensing/mac/install_flash_player_${MAJOR_VERSION}_osx_pkg.dmg"
@@ -199,20 +169,19 @@ then
 		# If we don't get anything, we can't proceed.
 		# This is probably an indication that PKG_URL needs to be verified as still correct
 	log "HTTP_STATUS for $PKG_URL is $HTTP_STATUS"
-	exit 1
+	exit 0
 fi
 
-	# We want to save the download with a filename which will include the version number.
-# FILENAME="$HOME/Downloads/FlashPlayer-$LATEST_VERSION.dmg"
+TEMPDIR=`mktemp -d /tmp/$NAME.XXXXXXXXX`
 
-FILENAME="${TMPDIR-/tmp/}FlashPlayer-$LATEST_VERSION.dmg"
+FILENAME="${TEMPDIR}/FlashPlayer-$LATEST_VERSION.dmg"
 
 	# This is where we do the download (if it isn't already downloaded)
-if [ -s "$FILENAME" ]
+if [[ -s "$FILENAME" ]]
 then
 	SIZE=$(zstat -L +size "$FILENAME")
 
-	if [ "$SIZE" = "$REMOTE_SIZE" ]
+	if [[ "$SIZE" == "$REMOTE_SIZE" ]]
 	then
 		log "$FILENAME is already completely downloaded"
 	else
@@ -227,10 +196,6 @@ fi
 #		This is where we mount the DMG we have downloaded
 #
 
-
-#     hdiutil attach "$flash_dmg" -mountpoint "$TMPMOUNT" -nobrowse -noverify -noautoopen
-
-
 MNTPNT=$(hdiutil attach -nobrowse -noverify -noautoopen -plist "$FILENAME" 2>/dev/null \
 		| fgrep -A 1 '<key>mount-point</key>' \
 		| tail -1 \
@@ -238,12 +203,13 @@ MNTPNT=$(hdiutil attach -nobrowse -noverify -noautoopen -plist "$FILENAME" 2>/de
 
 if [[ "$MNTPNT" = "" ]]
 then
-	log "MNTPNT is empty"
-	exit 1
+	log "MNTPNT is empty. $FILENAME failed to mount, so it will be deleted"
+	rm -f "$FILENAME"
+	exit 0
 fi
 
 	# This is where we look for the .pkg file in the mounted DMG
-PKG=`find "$MNTPNT" -iname \*.pkg -maxdepth 1`
+PKG=`find "$MNTPNT" -iname \*.pkg -maxdepth 1 -print`
 
 if [[ "$PKG" = "" ]]
 then
@@ -251,33 +217,97 @@ then
 	exit 1
 fi
 
-sudo installer -pkg "$PKG" -target / -lang en 2>&1 | tee -a "$LOG"
+installer -pkg "$PKG" -target / -lang en 2>&1 | tee -a "$LOG"
 
 EXIT="$?"
 
-if [ "$EXIT" = "0" ]
+if [ "$EXIT" != "0" ]
 then
-	log "Installation successful"
 
-	diskutil eject "${MNTPNT}"
+	log "Installation failed. Exit code = $EXIT"
 
-	DIR="/Volumes/Flash Player"
+	exit 0
+fi
 
-	if [ -e "$DIR" ]
+##################################################################################################################################
+#
+# If we get here, installation succeeded
+
+if (( $+commands[po.sh] ))
+then
+
+	if [[ "$INSTALLED_VERSION" == "" ]]
 	then
-		if (( $+commands[unmount.sh] ))
-		then
-				unmount.sh "$DIR"
-		else
-				diskutil eject "$DIR"
-		fi
+		log "Installed $LATEST_VERSION"
+		po.sh "$NAME: Installed $LATEST_VERSION"
+	else
+		log "Updated to $LATEST_VERSION from $INSTALLED_VERSION"
+		po.sh "$NAME: Updated to $LATEST_VERSION from $INSTALLED_VERSION"
+	fi
+fi
+
+##################################################################################################################################
+
+MAX_ATTEMPTS="10"
+
+SECONDS_BETWEEN_ATTEMPTS="5"
+
+	# strip away anything that isn't a 0-9 digit
+SECONDS_BETWEEN_ATTEMPTS=$(echo "$SECONDS_BETWEEN_ATTEMPTS" | tr -dc '[0-9]')
+
+MAX_ATTEMPTS=$(echo "$MAX_ATTEMPTS" | tr -dc '[0-9]')
+
+	# initialize the counter
+COUNT=0
+
+	# NOTE this 'while' loop can be changed to something else
+while [[ -d "$MNTPNT" ]]
+do
+		# increment counter (this is why we init to 0 not 1)
+	((COUNT++))
+
+		# check to see if we have exceeded maximum attempts
+	if [ "$COUNT" -gt "$MAX_ATTEMPTS" ]
+	then
+		log "Exceeded $MAX_ATTEMPTS"
+		exit 0
 	fi
 
-else
-	log "Installation failed (\$EXIT = $EXIT)"
+		# don't sleep the first time through the loop
+	[[ "$COUNT" != "1" ]] && sleep ${SECONDS_BETWEEN_ATTEMPTS}
 
+		# eject the DMG (or at least try)
+	diskutil eject "${MNTPNT}" 2>&1 | tee -a "${LOG}"
+
+done
+
+##################################################################################################################################
+
+ADOBE_PLIST='/Library/LaunchDaemons/com.adobe.fpsaud.plist'
+
+if [ -e "$ADOBE_PLIST" ]
+then
+
+		## How often do you want to check for updates?
+		# 86400 = 24 hours
+		# 21600 =  6 hours
+		#  3600 =  1 hour
+	RUN_SECONDS='21600'
+
+	INTERVAL=`defaults read "$ADOBE_PLIST" StartInterval 2>/dev/null`
+
+	if [ "$INTERVAL" != "$RUN_SECONDS" ]
+	then
+			# run every 6 hours (21600)
+		defaults write "$ADOBE_PLIST" StartInterval -integer ${RUN_SECONDS}
+		
+		chmod 644 "$ADOBE_PLIST"
+		
+		chown root:wheel "$ADOBE_PLIST"
+	fi
 fi
 
 exit 0
 #
 #EOF
+##################################################################################################################################
